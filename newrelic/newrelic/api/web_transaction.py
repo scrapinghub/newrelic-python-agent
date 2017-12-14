@@ -633,11 +633,12 @@ class WebTransaction(Transaction):
 
 class _WSGIApplicationIterable(object):
 
-    def __init__(self, transaction, generator):
+    def __init__(self, transaction, generator, group=None):
         self.transaction = transaction
         self.generator = generator
         self.response_trace = None
         self.closed = False
+        self.group = group if group is not None else 'Python/WSGI'
 
     def __iter__(self):
         self.start_trace()
@@ -668,7 +669,7 @@ class _WSGIApplicationIterable(object):
 
         if not self.response_trace:
             self.response_trace = FunctionTrace(self.transaction,
-                    name='Response', group='Python/WSGI')
+                    name='Response', group=self.group)
             self.response_trace.__enter__()
 
     def close(self):
@@ -1115,6 +1116,142 @@ class _WSGIApplicationMiddleware(object):
         if self.response_data:
             for data in self.response_data:
                 yield data
+
+
+def encode_response_wrapper(wrapped, transaction):
+    def new_encode_response(wrapped, instance, args, kwargs):
+        if not transaction._sent_start:
+            transaction._sent_start = time.time()
+        message = wrapped(*args, **kwargs)
+        transaction._calls_write += 1
+        try:
+            transaction._bytes_sent += len(message)
+        except Exception:
+            pass
+        transaction._sent_end = time.time()
+        return message
+    return FunctionWrapper(wrapped, new_encode_response)
+
+
+def ASGIApplicationWrapper(wrapped, application=None, name=None,
+                           group=None, framework=None):
+
+    if framework is not None and not isinstance(framework, tuple):
+        framework = (framework, None)
+
+    def _nr_asgi_application_wrapper_(wrapped, instance, args, kwargs):
+        def _args(message, *args, **kwargs):
+            return message
+
+        message = _args(*args, **kwargs)
+        # Check to see if any transaction is present, even an inactive
+        # one which has been marked to be ignored or which has been
+        # stopped already.
+
+        transaction = current_transaction(active_only=False)
+
+        if transaction:
+            # If there is any active transaction we will return without
+            # applying a new WSGI application wrapper context. In the
+            # case of a transaction which is being ignored or which has
+            # been stopped, we do that without doing anything further.
+
+            if transaction.ignore_transaction or transaction.stopped:
+                return wrapped(*args, **kwargs)
+
+            # For any other transaction, we record the details of any
+            # framework against the transaction for later reporting as
+            # supportability metrics.
+
+            if framework:
+                transaction.add_framework_info(name=framework[0],
+                                               version=framework[1])
+
+            # Also override the web transaction name to be the name of
+            # the wrapped callable if not explicitly named, and we want
+            # the default name to be that of the WSGI component for the
+            # framework. This will override the use of a raw URL which
+            # can result in metric grouping issues where a framework is
+            # not instrumented or is leaking URLs.
+
+            settings = transaction._settings
+
+            if name is None and settings:
+                if framework is not None:
+                    naming_scheme = settings.transaction_name.naming_scheme
+                    if naming_scheme in (None, 'framework'):
+                        transaction.set_transaction_name(
+                            callable_name(wrapped), priority=1)
+
+            elif name:
+                transaction.set_transaction_name(name, group, priority=1)
+
+            return wrapped(*args, **kwargs)
+
+        target_application = application
+        if not hasattr(application, 'activate'):
+            target_application = application_instance(application)
+
+        # Now start recording the actual web transaction.
+
+        request = instance.request_class(message)
+        transaction = WebTransaction(target_application, request.META)
+        transaction.__enter__()
+
+        instance.encode_response = encode_response_wrapper(
+            instance.__class__.encode_response,
+            transaction,
+        )
+
+        # Record details of framework against the transaction for later
+        # reporting as supportability metrics.
+
+        if framework:
+            transaction.add_framework_info(name=framework[0],
+                                           version=framework[1])
+
+        # Override the initial web transaction name to be the supplied
+        # name, or the name of the wrapped callable if wanting to use
+        # the callable as the default. This will override the use of a
+        # raw URL which can result in metric grouping issues where a
+        # framework is not instrumented or is leaking URLs.
+        #
+        # Note that at present if default for naming scheme is still
+        # None and we aren't specifically wrapping a designated
+        # framework, then we still allow old URL based naming to
+        # override. When we switch to always forcing a name we need to
+        # check for naming scheme being None here.
+
+        settings = transaction._settings
+
+        if name is None and settings:
+            naming_scheme = settings.transaction_name.naming_scheme
+
+            if framework is not None:
+                if naming_scheme in (None, 'framework'):
+                    transaction.set_transaction_name(
+                        callable_name(wrapped), priority=1)
+
+            elif naming_scheme in ('component', 'framework'):
+                transaction.set_transaction_name(
+                    callable_name(wrapped), priority=1)
+
+        elif name:
+            transaction.set_transaction_name(name, group, priority=1)
+
+        try:
+            with FunctionTrace(transaction, name='Application',
+                               group='Python/ASGI'):
+                with FunctionTrace(transaction, name=callable_name(wrapped)):
+                    result = wrapped(message)
+
+        except:  # Catch all
+            transaction.__exit__(*sys.exc_info())
+            raise
+
+        return _WSGIApplicationIterable(transaction, result, group='Python/ASGI')
+
+    return FunctionWrapper(wrapped, _nr_asgi_application_wrapper_)
 
 
 def WSGIApplicationWrapper(wrapped, application=None, name=None,
