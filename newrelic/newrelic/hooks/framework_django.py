@@ -13,7 +13,8 @@ from newrelic.api.function_trace import (FunctionTrace, wrap_function_trace,
 from newrelic.api.html_insertion import insert_html_snippet
 from newrelic.api.transaction import current_transaction
 from newrelic.api.transaction_name import wrap_transaction_name
-from newrelic.api.web_transaction import WSGIApplicationWrapper
+from newrelic.api.web_transaction import (WSGIApplicationWrapper,
+                                          ASGIApplicationWrapper)
 
 from newrelic.common.object_wrapper import (FunctionWrapper, wrap_in_function,
         wrap_post_function, wrap_function_wrapper, function_wrapper)
@@ -473,6 +474,21 @@ def wrap_handle_uncaught_exception(middleware):
             return _wrapped(*args, **kwargs)
 
     return FunctionWrapper(middleware, wrapper)
+
+
+def instrument_channels_handler_asgi(module):
+
+    import django
+
+    framework = ('Django', django.get_version())
+
+    module.AsgiHandler.__call__ = ASGIApplicationWrapper(
+          module.AsgiHandler.__call__, framework=framework)
+
+    if hasattr(module.AsgiHandler, 'handle_uncaught_exception'):
+        module.AsgiHandler.handle_uncaught_exception = (
+                wrap_handle_uncaught_exception(
+                module.AsgiHandler.handle_uncaught_exception))
 
 
 def instrument_django_core_handlers_wsgi(module):

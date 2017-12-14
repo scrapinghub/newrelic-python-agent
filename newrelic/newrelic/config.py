@@ -1901,6 +1901,9 @@ def _process_module_builtin_defaults():
     _process_module_definition('django.core.handlers.wsgi',
             'newrelic.hooks.framework_django',
             'instrument_django_core_handlers_wsgi')
+    _process_module_definition('channels.handler',
+            'newrelic.hooks.framework_django',
+            'instrument_channels_handler_asgi')
     _process_module_definition('django.core.urlresolvers',
             'newrelic.hooks.framework_django',
             'instrument_django_core_urlresolvers')
