@@ -1281,6 +1281,7 @@ def ASGIApplicationWrapper(wrapped, application=None, name=None,
 
         request = instance.request_class(message)
         transaction = WebTransaction(target_application, request.META)
+        transaction.queue_start = message.get('__asgi_send_time__')
         transaction.__enter__()
 
         instance.encode_response = encode_response_wrapper(
