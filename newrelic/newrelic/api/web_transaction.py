@@ -1279,7 +1279,10 @@ def ASGIApplicationWrapper(wrapped, application=None, name=None,
 
         # Now start recording the actual web transaction.
 
-        request = instance.request_class(message)
+        message_copy = message.copy()
+        message_copy.content.pop('body', None)
+        message_copy.content.pop('body_channel', None)
+        request = instance.request_class(message_copy)
         transaction = WebTransaction(target_application, request.META)
         transaction.queue_start = message.get('__asgi_send_time__')
         transaction.__enter__()
